@@ -4,6 +4,9 @@ package rate
 import (
 	"context"
 	"errors"
+	"github.com/armon/go-metrics"
+	logdrop "github.com/hashicorp/consul/agent/log-drop"
+	"github.com/hashicorp/go-hclog"
 	"net"
 	"sync/atomic"
 
@@ -111,6 +114,8 @@ type Handler struct {
 	delegate HandlerDelegate
 
 	limiter multilimiter.RateLimiter
+
+	logger hclog.InterceptLogger
 }
 
 type HandlerConfig struct {
@@ -138,7 +143,7 @@ type HandlerDelegate interface {
 }
 
 // NewHandler creates a new RPC rate limit handler.
-func NewHandler(cfg HandlerConfig, delegate HandlerDelegate) *Handler {
+func NewHandler(cfg HandlerConfig, delegate HandlerDelegate, logger hclog.InterceptLogger) *Handler {
 	limiter := multilimiter.NewMultiLimiter(cfg.Config)
 	limiter.UpdateConfig(cfg.GlobalWriteConfig, globalWrite)
 	limiter.UpdateConfig(cfg.GlobalReadConfig, globalRead)
@@ -147,6 +152,7 @@ func NewHandler(cfg HandlerConfig, delegate HandlerDelegate) *Handler {
 		cfg:      new(atomic.Pointer[HandlerConfig]),
 		delegate: delegate,
 		limiter:  limiter,
+		logger:   logger.NamedIntercept("rate-limit"),
 	}
 	h.cfg.Store(&cfg)
 
@@ -158,6 +164,9 @@ func NewHandler(cfg HandlerConfig, delegate HandlerDelegate) *Handler {
 // Note: this starts a goroutine.
 func (h *Handler) Run(ctx context.Context) {
 	h.limiter.Run(ctx)
+	h.logger.RegisterSink(logdrop.NewLogDropSink(ctx, "rate-limiter", 100, hclog.NewSinkAdapter(nil), func(l logdrop.Log) {
+		metrics.IncrCounter([]string{"consul", "rate_limit", "log_dropped"}, 1)
+	}))
 }
 
 // Allow returns an error if the given operation is not allowed to proceed
