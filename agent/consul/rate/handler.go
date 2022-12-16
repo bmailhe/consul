@@ -172,6 +172,7 @@ func (h *Handler) Run(ctx context.Context) {
 // Allow returns an error if the given operation is not allowed to proceed
 // because of an exhausted rate-limit.
 func (h *Handler) Allow(op Operation) error {
+	// TODO(rate-limiter): use the logger to print rate limiter logs.
 	// TODO(NET-1383): actually implement the rate limiting logic.
 	//
 	// Example:
