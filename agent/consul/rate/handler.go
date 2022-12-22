@@ -120,7 +120,7 @@ type Handler struct {
 
 	limiter multilimiter.RateLimiter
 
-	logger hclog.InterceptLogger
+	logger hclog.Logger
 }
 
 type HandlerConfig struct {
@@ -147,9 +147,9 @@ type HandlerDelegate interface {
 	IsLeader() bool
 }
 
-// NewHandler creates a new RPC rate limit handler.
+// NewHandlerWithLimiter creates a new RPC rate limit handler.
 func NewHandlerWithLimiter(cfg HandlerConfig, delegate HandlerDelegate,
-	limiter multilimiter.RateLimiter, logger hclog.InterceptLogger) *Handler {
+	limiter multilimiter.RateLimiter, logger hclog.Logger) *Handler {
 	limiter.UpdateConfig(cfg.GlobalWriteConfig, globalWrite)
 	limiter.UpdateConfig(cfg.GlobalReadConfig, globalRead)
 
@@ -157,7 +157,7 @@ func NewHandlerWithLimiter(cfg HandlerConfig, delegate HandlerDelegate,
 		cfg:      new(atomic.Pointer[HandlerConfig]),
 		delegate: delegate,
 		limiter:  limiter,
-		logger:   logger.NamedIntercept("rate-limit"),
+		logger:   logger.Named("rate-limit"),
 	}
 	h.cfg.Store(&cfg)
 
