@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 
 	"github.com/hashicorp/consul/agent/consul/multilimiter"
-	"github.com/hashicorp/go-hclog"
 )
 
 var (
@@ -120,7 +119,7 @@ type Handler struct {
 	delegate HandlerDelegate
 
 	limiter multilimiter.RateLimiter
-  
+
 	logger hclog.InterceptLogger
 }
 
@@ -166,7 +165,7 @@ func NewHandlerWithLimiter(cfg HandlerConfig, delegate HandlerDelegate,
 }
 
 // NewHandler creates a new RPC rate limit handler.
-func NewHandler(cfg HandlerConfig, delegate HandlerDelegate, logger hclog.Logger) *Handler {
+func NewHandler(cfg HandlerConfig, delegate HandlerDelegate, logger hclog.InterceptLogger) *Handler {
 	limiter := multilimiter.NewMultiLimiter(cfg.Config)
 	return NewHandlerWithLimiter(cfg, delegate, limiter, logger)
 }
@@ -191,7 +190,7 @@ func (h *Handler) Allow(op Operation) error {
 	}
 
 	if !h.limiter.Allow(globalWrite) {
-    // TODO(rate-limiter): use the logger to print rate limiter logs.
+		// TODO(rate-limiter): use the logger to print rate limiter logs.
 		// TODO(NET-1383): actually implement the rate limiting logic and replace this returned nil.
 		return nil
 	}
