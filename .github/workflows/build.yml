@@ -1,289 +1,167 @@
+---
 name: build
 
 on:
+  workflow_dispatch:
+  pull_request:
   push:
-    # Sequence of patterns matched against refs/heads
     branches:
-      # Push events on the main branch
       - main
       - release/**
+      - releng-329
 
 env:
   PKG_NAME: consul
 
 jobs:
-  get-product-version:
+  product-metadata:
     runs-on: ubuntu-latest
     outputs:
-      product-version: ${{ steps.get-product-version.outputs.product-version }}
-      product-date: ${{ steps.get-product-version.outputs.product-date }}
-      pre-version: ${{ steps.get-product-version.outputs.pre-version }}
-      pkg-version: ${{ steps.get-product-version.outputs.pkg-version }}
-      shared-ldflags: ${{ steps.shared-ldflags.outputs.shared-ldflags }}
-    steps:
-      - uses: actions/checkout@v2
-      - name: get product version
-        id: get-product-version
-        run: |
-          CONSUL_VERSION=$(build-support/scripts/version.sh -r)
-          CONSUL_DATE=$(build-support/scripts/build-date.sh)
-          ## TODO: This assumes `make version` outputs 1.1.1+ent-prerel
-          IFS="+" read VERSION _other <<< "$CONSUL_VERSION"
-          IFS="-" read _other PREREL_VERSION <<< "$CONSUL_VERSION"
-          ## TODO: this assumes `version.sh` outputs in the expected ordering of
-          ##       [version]+ent{-prerelease}  If we need to transition to
-          ##       [version]{-prerelease}+ent before then, we'll need to add
-          ##       logic to handle presense/absence of the prerelease
-          echo "::set-output name=product-version::${CONSUL_VERSION}"
-          echo "::set-output name=product-date::${CONSUL_DATE}"
-          echo "::set-output name=pre-version::${PREREL_VERSION}"
-          echo "::set-output name=pkg-version::${VERSION}"
-
-      - name: Set shared -ldflags
-        id: shared-ldflags
-        run: |
-          T="github.com/hashicorp/consul/version"
-          echo "::set-output name=shared-ldflags::-X ${T}.GitCommit=${GITHUB_SHA::8} -X ${T}.GitDescribe=${{ steps.get-product-version.outputs.product-version }} -X ${T}.BuildDate=${{ steps.get-product-version.outputs.product-date }}"
-
-  generate-metadata-file:
-    needs: get-product-version
-    runs-on: ubuntu-latest
-    outputs:
+      build-date: ${{ steps.get-metadata.outputs.build-date }}
       filepath: ${{ steps.generate-metadata-file.outputs.filepath }}
+      go-version: ${{ steps.get-metadata.outputs.go-version }}
+      package-name: ${{ steps.get-metadata.outputs.package-name }}
+      consul-revision: ${{ steps.get-metadata.outputs.consul-revision }}
+      consul-version: ${{ steps.get-metadata.outputs.consul-version }}
+      consul-base-version: ${{ steps.get-metadata.outputs.consul-base-version }}
     steps:
-      - name: 'Checkout directory'
-        uses: actions/checkout@v2
-      - name: Generate metadata file
+      - uses: actions/checkout@v3
+      - name: Get metadata
+        id: get-metadata
+        run: |
+          echo "build-date=$(make crt-get-date)" >> $GITHUB_OUTPUT
+          echo "go-version=$(cat ./.go-version)" >> $GITHUB_OUTPUT
+          echo "matrix-test-group=$(make crt-get-matrix-group-id)" >> $GITHUB_OUTPUT
+          echo "package-name=${{ env.PKG_NAME }}" >> $GITHUB_OUTPUT
+          echo "consul-base-version=$(make crt-get-version-base)" >> $GITHUB_OUTPUT
+          echo "consul-revision=$(make crt-get-revision)" >> $GITHUB_OUTPUT
+          echo "consul-version=$(make crt-get-version)" >> $GITHUB_OUTPUT
+      - uses: hashicorp/actions-generate-metadata@v1
         id: generate-metadata-file
-        uses: hashicorp/actions-generate-metadata@v1
         with:
-          version: ${{ needs.get-product-version.outputs.product-version }}
-          product: ${{ env.PKG_NAME }}
-
-      - uses: actions/upload-artifact@v2
+          version: ${{ steps.get-metadata.outputs.consul-version }}
+          product: ${{ steps.get-metadata.outputs.package-name }}
+      - uses: actions/upload-artifact@v3
         with:
           name: metadata.json
           path: ${{ steps.generate-metadata-file.outputs.filepath }}
-
-  build:
-    needs: get-product-version
-    runs-on: ubuntu-latest
+          if-no-files-found: error
+  build-other:
+    name: Build Consul Other
+    needs: product-metadata
     strategy:
       matrix:
         include:
-          - {go: "1.19.4", goos: "linux", goarch: "386"}
-          - {go: "1.19.4", goos: "linux", goarch: "amd64"}
-          - {go: "1.19.4", goos: "linux", goarch: "arm"}
-          - {go: "1.19.4", goos: "linux", goarch: "arm64"}
-          - {go: "1.19.4", goos: "freebsd", goarch: "386"}
-          - {go: "1.19.4", goos: "freebsd", goarch: "amd64"}
-          - {go: "1.19.4", goos: "windows", goarch: "386"}
-          - {go: "1.19.4", goos: "windows", goarch: "amd64"}
-          - {go: "1.19.4", goos: "solaris", goarch: "amd64"}
+          - {goos: "freebsd", goarch: "386"}
+          - {goos: "freebsd", goarch: "amd64"}
+          - {goos: "windows", goarch: "386"}
+          - {goos: "windows", goarch: "amd64"}
+          - {goos: "solaris", goarch: "amd64"}
       fail-fast: true
+    uses: ./.github/workflows/build-consul-oss.yml
+    with:
+      create-packages: false
+      goarch: ${{ matrix.goarch }}
+      goos: ${{ matrix.goos }}
+      go-tags: ui
+      go-version: ${{ needs.product-metadata.outputs.go-version }}
+      package-name: ${{ needs.product-metadata.outputs.package-name }}
+      consul-version: ${{ needs.product-metadata.outputs.consul-version }}
+    secrets: inherit
 
-    name: Go ${{ matrix.go }} ${{ matrix.goos }} ${{ matrix.goarch }} build
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup go
-        uses: actions/setup-go@v2
-        with:
-          go-version: ${{ matrix.go }}
-
-      - name: Setup with node and yarn
-        uses: actions/setup-node@v2
-        with:
-          node-version: '14'
-          cache: 'yarn'
-          cache-dependency-path: 'ui/yarn.lock'
-
-      - name: Build UI
-        run: |
-          CONSUL_VERSION=${{ needs.get-product-version.outputs.product-version }}
-          CONSUL_DATE=${{ needs.get-product-version.outputs.product-date }}
-          CONSUL_BINARY_TYPE=${CONSUL_BINARY_TYPE}
-          CONSUL_COPYRIGHT_YEAR=$(git show -s --format=%cd --date=format:%Y HEAD)
-          echo "consul_version is ${CONSUL_VERSION}"
-          echo "consul_date is ${CONSUL_DATE}"
-          echo "consul binary type is ${CONSUL_BINARY_TYPE}"
-          echo "consul copyright year is ${CONSUL_COPYRIGHT_YEAR}"
-          cd ui && make && cd ..
-          rm -rf agent/uiserver/dist
-          mv ui/packages/consul-ui/dist agent/uiserver/
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-          GOLDFLAGS: "${{needs.get-product-version.outputs.shared-ldflags}}"
-        run: |
-          mkdir dist out
-          go build -ldflags="$GOLDFLAGS" -o dist/ .
-          zip -r -j out/${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip dist/
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: ${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
-          path: out/${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
-
-      - name: Package
-        if: ${{ matrix.goos == 'linux' }}
-        uses: hashicorp/actions-packaging-linux@v1
-        with:
-          name: ${{ github.event.repository.name }}
-          description: "Consul is a distributed, highly available, and data center aware solution to connect and configure applications across dynamic, distributed infrastructure. "
-          arch: ${{ matrix.goarch }}
-          version: ${{ needs.get-product-version.outputs.product-version }}
-          maintainer: "HashiCorp"
-          homepage: "https://github.com/hashicorp/consul"
-          license: "MPL-2.0"
-          binary: "dist/${{ env.PKG_NAME }}"
-          deb_depends: "openssl"
-          rpm_depends: "openssl"
-          config_dir: ".release/linux/package"
-          preinstall: ".release/linux/preinstall"
-          postinstall: ".release/linux/postinstall"
-          preremove: ".release/linux/preremove"
-          postremove: ".release/linux/postremove"
-
-      - name: Set Package Names
-        if: ${{ matrix.goos == 'linux' }}
-        run: |
-          echo "RPM_PACKAGE=$(basename out/*.rpm)" >> $GITHUB_ENV
-          echo "DEB_PACKAGE=$(basename out/*.deb)" >> $GITHUB_ENV
-
-      - uses: actions/upload-artifact@v2
-        if: ${{ matrix.goos == 'linux' }}
-        with:
-          name: ${{ env.RPM_PACKAGE }}
-          path: out/${{ env.RPM_PACKAGE }}
-
-      - uses: actions/upload-artifact@v2
-        if: ${{ matrix.goos == 'linux' }}
-        with:
-          name: ${{ env.DEB_PACKAGE }}
-          path: out/${{ env.DEB_PACKAGE }}
+  build-linux:
+    name: Build Consul Linux
+    needs: product-metadata
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [arm, arm64, 386, amd64]
+      fail-fast: true
+    uses: ./.github/workflows/build-consul-oss.yml
+    with:
+      goarch: ${{ matrix.goarch }}
+      goos: ${{ matrix.goos }}
+      go-tags: ui
+      go-version: ${{ needs.product-metadata.outputs.go-version }}
+      package-name: ${{ needs.product-metadata.outputs.package-name }}
+      consul-version: ${{ needs.product-metadata.outputs.consul-version }}
+    secrets: inherit
 
   build-darwin:
-    needs: get-product-version
-    runs-on: macos-latest
+    name: Build Consul Darwin
+    needs: product-metadata
     strategy:
       matrix:
-        goos: [ darwin ]
-        goarch: [ "amd64", "arm64" ]
-        go: [ "1.19.4" ]
+        goos: [darwin]
+        goarch: [amd64, arm64]
       fail-fast: true
-
-    name: Go ${{ matrix.go }} ${{ matrix.goos }} ${{ matrix.goarch }} build
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup go
-        uses: actions/setup-go@v2
-        with:
-          go-version: ${{ matrix.go }}
-
-      - name: Setup with node and yarn
-        uses: actions/setup-node@v2
-        with:
-          node-version: '14'
-          cache: 'yarn'
-          cache-dependency-path: 'ui/yarn.lock'
-
-      - name: Build UI
-        run: |
-          CONSUL_VERSION=${{ needs.get-product-version.outputs.product-version }}
-          CONSUL_BINARY_TYPE=${CONSUL_BINARY_TYPE}
-          CONSUL_COPYRIGHT_YEAR=$(git show -s --format=%cd --date=format:%Y HEAD)
-          echo "consul_version is ${CONSUL_VERSION}"
-          echo "consul binary type is ${CONSUL_BINARY_TYPE}"
-          echo "consul copyright year is ${CONSUL_COPYRIGHT_YEAR}"
-          cd ui && make && cd ..
-          rm -rf agent/uiserver/dist
-          mv ui/packages/consul-ui/dist agent/uiserver/
-
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOLDFLAGS: "${{ needs.get-product-version.outputs.shared-ldflags }}"
-        run: |
-          mkdir dist out
-          go build -ldflags="$GOLDFLAGS" -tags netcgo -o dist/ .
-          zip -r -j out/${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip dist/
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: ${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
-          path: out/${{ env.PKG_NAME }}_${{ needs.get-product-version.outputs.product-version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
-
+    uses: ./.github/workflows/build-consul-oss.yml
+    with:
+      create-packages: false
+      goarch: ${{ matrix.goarch }}
+      goos: ${{ matrix.goos }}
+      go-tags: ui netcgo
+      go-version: ${{ needs.product-metadata.outputs.go-version }}
+      package-name: ${{ needs.product-metadata.outputs.package-name }}
+      consul-version: ${{ needs.product-metadata.outputs.consul-version }}
+    secrets: inherit
+  
   build-docker:
-    name: Docker ${{ matrix.arch }} build
+    name: Build Consul Docker
     needs:
-      - get-product-version
-      - build
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: ["386", "amd64", "arm", "arm64"]
+        arch: [arm, arm64, 386, amd64]
     env:
-      repo: ${{github.event.repository.name}}
-      version: ${{needs.get-product-version.outputs.product-version}}
-
+      repo: ${{ github.event.repository.name }}
+      version: ${{ needs.product-metadata.outputs.consul-version }}
     steps:
-      - uses: actions/checkout@v2
-
-      # Strip everything but MAJOR.MINOR from the version string and add a `-dev` suffix
-      # This naming convention will be used ONLY for per-commit dev images
-      - name: Set docker dev tag
-        run: |
-          version="${{ env.version }}"
-          echo "dev_tag=${version%.*}-dev" >> $GITHUB_ENV
-
-      - name: Docker Build (Action)
-        uses: hashicorp/actions-docker-build@v1
+      - uses: actions/checkout@v3
+      - uses: hashicorp/actions-docker-build@v1
         with:
-          version: ${{env.version}}
+          version: ${{ env.version }}
           target: default
-          arch: ${{matrix.arch}}
+          arch: ${{ matrix.arch }}
+          zip_artifact_name: ${{ env.PKG_NAME }}_${{ needs.product-metadata.outputs.consul-version }}_linux_${{ matrix.arch }}.zip
           tags: |
-            docker.io/hashicorp/${{env.repo}}:${{env.version}}
-            public.ecr.aws/hashicorp/${{env.repo}}:${{env.version}}
-          dev_tags: |
-            docker.io/hashicorppreview/${{ env.repo }}:${{ env.dev_tag }}
-            docker.io/hashicorppreview/${{ env.repo }}:${{ env.dev_tag }}-${{ github.sha }}
-          smoke_test: .github/scripts/verify_docker.sh v${{ env.version }}
+            docker.io/hashicorp/${{ env.repo }}:${{ env.version }}
+            public.ecr.aws/hashicorp/${{ env.repo }}:${{ env.version }}
 
-  build-docker-ubi-redhat:
-    name: Docker Build UBI Image for RedHat Registry
+  build-ubi:
+    name: Build Consul Red Hat UBI
     needs:
-      - get-product-version
-      - build
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64]
     env:
-      repo: ${{github.event.repository.name}}
-      version: ${{needs.get-product-version.outputs.product-version}}
-
+      repo: ${{ github.event.repository.name }}
+      version: ${{ needs.product-metadata.outputs.consul-version }}
     steps:
       - uses: actions/checkout@v2
       - uses: hashicorp/actions-docker-build@v1
         with:
-          version: ${{env.version}}
+          version: ${{ env.version }}
           target: ubi
-          arch: amd64
-          redhat_tag: quay.io/redhat-isv-containers/60f9fdbec3a80eac643abedf:${{env.version}}-ubi
-          smoke_test: .github/scripts/verify_docker.sh v${{ env.version }}
+          arch: ${{ matrix.arch }}
+          zip_artifact_name: ${{ env.PKG_NAME }}_${{ needs.product-metadata.outputs.consul-version }}_linux_${{ matrix.arch }}.zip
+          # TODO: change opsid tag
+          redhat_tag: quay.io/redhat-isv-containers/5f89bb5e0b94cf64cfeb500a:${{ env.version }}-ubi
 
   build-docker-ubi-dockerhub:
     name: Docker Build UBI Image for DockerHub
     needs:
-      - get-product-version
-      - build
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
     env:
       repo: ${{github.event.repository.name}}
-      version: ${{needs.get-product-version.outputs.product-version}}
+      version: ${{ needs.product-metadata.outputs.consul-version }}
 
     steps:
       - uses: actions/checkout@v2
@@ -310,16 +188,16 @@ jobs:
 
   verify-linux:
     needs:
-      - get-product-version
-      - build
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
         arch: ["386", "amd64", "arm", "arm64"]
       fail-fast: true
     env:
-      version: ${{ needs.get-product-version.outputs.product-version }}
-      zip_name: consul_${{ needs.get-product-version.outputs.product-version }}_linux_${{ matrix.arch }}.zip
+      version: ${{ needs.product-metadata.outputs.consul-version }}
+      zip_name: consul_${{ needs.product-metadata.outputs.consul-version }}_linux_${{ matrix.arch }}.zip
 
     name: Verify ${{ matrix.arch }} linux binary
     steps:
@@ -342,14 +220,14 @@ jobs:
 
   verify-darwin:
     needs:
-      - get-product-version
+      - product-metadata
       - build-darwin
     runs-on: macos-latest
     strategy:
       fail-fast: true
     env:
-      version: ${{needs.get-product-version.outputs.product-version}}
-      zip_name: consul_${{ needs.get-product-version.outputs.product-version }}_darwin_amd64.zip
+      version: ${{ needs.product-metadata.outputs.consul-version }}
+      zip_name: consul_${{ needs.product-metadata.outputs.consul-version }}_darwin_amd64.zip
 
     name: Verify amd64 darwin binary
     steps:
@@ -368,15 +246,15 @@ jobs:
 
   verify-linux-packages-deb:
     needs:
-      - build
-      - get-product-version
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
         arch: ["i386", "amd64", "armhf", "arm64"]
       # fail-fast: true
     env:
-      version: ${{ needs.get-product-version.outputs.product-version }}
+      version: ${{ needs.product-metadata.outputs.consul-version }}
 
     name: Verify ${{ matrix.arch }} debian package
     steps:
@@ -384,7 +262,7 @@ jobs:
 
       - name: Set package version
         run: |
-          echo "pkg_version=$(echo ${{ needs.get-product-version.outputs.product-version }} | sed 's/\-/~/g')" >> $GITHUB_ENV
+          echo "pkg_version=$(echo ${{ needs.product-metadata.outputs.consul-version }} | sed 's/\-/~/g')" >> $GITHUB_ENV
 
       - name: Set package name
         run: |
@@ -405,15 +283,15 @@ jobs:
 
   verify-linux-packages-rpm:
     needs:
-      - build
-      - get-product-version
+      - product-metadata
+      - build-linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
         # TODO(eculver): re-enable when there is a smaller verification container available
         arch: ["i386", "x86_64"] #, "armv7hl", "aarch64"]
     env:
-      version: ${{ needs.get-product-version.outputs.product-version }}
+      version: ${{ needs.product-metadata.outputs.consul-version }}
 
     name: Verify ${{ matrix.arch }} rpm
     steps:
@@ -421,7 +299,7 @@ jobs:
 
       - name: Set package version
         run: |
-          echo "pkg_version=$(echo ${{ needs.get-product-version.outputs.product-version }} | sed 's/\-/~/g')" >> $GITHUB_ENV
+          echo "pkg_version=$(echo ${{ needs.product-metadata.outputs.consul-version }} | sed 's/\-/~/g')" >> $GITHUB_ENV
 
       - name: Set package name
         run: |
